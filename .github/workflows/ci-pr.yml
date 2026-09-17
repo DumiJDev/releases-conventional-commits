@@ -45,13 +45,33 @@ jobs:
           echo "Changed files:"
           cat changed-files.txt
 
-      - name: Validate formatting
+      - name: Check Spotless
         id: spotless
-        continue-on-error: true
-        run: ./mvnw -B spotless:check
-
+        run: |
+          set +e
+              
+          ./mvnw -B spotless:check
+          STATUS=$?
+              
+          if [[ "$STATUS" -ne 0 ]]; then
+            echo "::warning::Spotless encontrou problemas de formatação."
+            echo "::warning::Execute './mvnw spotless:apply' para corrigir."
+              
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+              
+          exit 0
+              
+      - name: Spotless result
+        if: steps.spotless.outputs.changed == 'true'
+        run: |
+          echo "⚠️ Código fora do padrão Spotless."
+          echo "Execute:"
+          echo "./mvnw spotless:apply"
+              
       - name: Run SpotBugs
-        if: steps.spotless.outcome == 'failure'
         run: ./mvnw -B compile spotbugs:check
 
       - name: Detect affected tests
