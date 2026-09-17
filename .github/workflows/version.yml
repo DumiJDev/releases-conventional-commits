@@ -30,6 +30,7 @@ jobs:
         shell: bash
         run: |
 
+          chmod +x ./mvnw
           CURRENT_VERSION=$(./mvnw help:evaluate \
             -Dexpression=project.version \
             -q \
