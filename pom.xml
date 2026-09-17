@@ -14,7 +14,7 @@
 
 	<groupId>io.github.dumijdev</groupId>
 	<artifactId>release-conventional-commits</artifactId>
-	<version>0.2.0</version>
+	<version>0.3.0</version>
 
 	<name>release-conventional-commits</name>
 	<description>Conventional Commits based Maven release pipeline</description>
