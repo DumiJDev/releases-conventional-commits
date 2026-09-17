@@ -1,4 +1,4 @@
-name: Cleanup Release
+name: Cleanup Releases
 
 on:
   workflow_run:
@@ -11,78 +11,58 @@ permissions:
   packages: write
 
 jobs:
-
   cleanup:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-
+    name: Keep Latest 5 Versions
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
-
-      - name: Cleanup old images
+      - name: Cleanup GHCR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
+          REPOSITORY: ${{ github.repository }}
         run: |
+          set -euo pipefail
 
-          PACKAGE="${GITHUB_REPOSITORY#*/}"
+          OWNER="${REPOSITORY%%/*}"
+          PACKAGE="${REPOSITORY#*/}"
 
-          PACKAGE=$(echo "$PACKAGE" | tr '[:upper:]' '[:lower:]')
+          PACKAGE="$(echo "$PACKAGE" | tr '[:upper:]' '[:lower:]')"
 
+          echo "Repository: $REPOSITORY"
           echo "Package: $PACKAGE"
-
-          # --------------------------------------------------
-          # Get package versions
-          # --------------------------------------------------
 
           gh api \
             --paginate \
-            "/user/packages/container/${PACKAGE}/versions?per_page=100" \
+            "/users/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" \
             > versions.json
-
-          # --------------------------------------------------
-          # Get tagged versions, excluding latest
-          #
-          # Keep only semantic versions:
-          # X.Y.Z
-          # --------------------------------------------------
 
           mapfile -t VERSIONS < <(
             jq -r '
               .[]
-              | .metadata.container.tags[]?
+              | .metadata.container.tags[]
               | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
-            ' versions.json \
-            | sort -V -r \
-            | uniq
+            ' versions.json |
+            sort -Vu |
+            tail -n +1 |
+            tac
           )
 
-          echo ""
-          echo "Versions:"
+          echo "Semantic versions:"
           printf '%s\n' "${VERSIONS[@]}"
-
-          # --------------------------------------------------
-          # Keep 5
-          # --------------------------------------------------
 
           KEEP=5
 
-          if [ "${#VERSIONS[@]}" -le "$KEEP" ]; then
-            echo ""
-            echo "Nothing to cleanup."
+          if [[ "${#VERSIONS[@]}" -le "$KEEP" ]]; then
+            echo "Nothing to delete."
             exit 0
           fi
 
-          # --------------------------------------------------
-          # Delete versions older than the 5 newest
-          # --------------------------------------------------
-
           for VERSION in "${VERSIONS[@]:$KEEP}"; do
 
-            echo ""
-            echo "Deleting: $VERSION"
+            echo "Deleting version: $VERSION"
 
-            VERSION_ID=$(
+            VERSION_ID="$(
               jq -r \
                 --arg version "$VERSION" '
                   .[]
@@ -91,20 +71,17 @@ jobs:
                       | index($version)
                     )
                   | .id
-                ' versions.json \
-                | head -n 1
-            )
+                ' versions.json |
+              head -n 1
+            )"
 
-            if [ -z "$VERSION_ID" ] || [ "$VERSION_ID" = "null" ]; then
-              echo "Could not find package ID for $VERSION"
+            if [[ -z "$VERSION_ID" || "$VERSION_ID" == "null" ]]; then
+              echo "Could not find package version ID for $VERSION"
               continue
             fi
 
             gh api \
               --method DELETE \
-              "/user/packages/container/${PACKAGE}/versions/${VERSION_ID}"
+              "/users/${OWNER}/packages/container/${PACKAGE}/versions/${VERSION_ID}"
 
           done
-
-          echo ""
-          echo "Cleanup complete."

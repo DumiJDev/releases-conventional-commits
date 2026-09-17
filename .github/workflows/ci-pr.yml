@@ -1,0 +1,247 @@
+name: CI - Pull Request
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Enable Maven Wrapper
+        run: chmod +x mvnw
+
+      - name: Validate Maven Wrapper
+        run: ./mvnw --version
+
+      - name: Detect changed files
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-files.txt
+
+          echo "Changed files:"
+          cat changed-files.txt
+
+      - name: Check Spotless
+        id: spotless
+        run: |
+          set +e
+              
+          ./mvnw -B spotless:check
+          STATUS=$?
+              
+          if [[ "$STATUS" -ne 0 ]]; then
+            echo "::warning::Spotless encontrou problemas de formatação."
+            echo "::warning::Execute './mvnw spotless:apply' para corrigir."
+              
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+              
+          exit 0
+              
+      - name: Spotless result
+        if: steps.spotless.outputs.changed == 'true'
+        run: |
+          echo "⚠️ Código fora do padrão Spotless."
+          echo "Execute:"
+          echo "./mvnw spotless:apply"
+              
+      - name: Run SpotBugs
+        run: ./mvnw -B compile spotbugs:check
+
+      - name: Detect affected tests
+        id: tests
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p .ci
+
+          : > .ci/affected-tests.txt
+          : > .ci/test-warnings.txt
+
+          has_code_changes=false
+
+          while IFS= read -r file; do
+
+            case "$file" in
+              src/main/java/*.java)
+                ;;
+              *)
+                continue
+                ;;
+            esac
+
+            if [[ ! -f "$file" ]]; then
+              continue
+            fi
+
+            echo "Analyzing: $file"
+
+            # Only inspect actual added/removed lines.
+            diff_lines="$(
+              git diff --unified=0 "$BASE_SHA" "$HEAD_SHA" -- "$file" |
+              grep -E '^[+-][^+-]' || true
+            )"
+
+            if [[ -z "$diff_lines" ]]; then
+              continue
+            fi
+
+            # Remove comments and blank lines.
+            code_lines="$(
+              printf '%s\n' "$diff_lines" |
+              sed -E \
+                -e 's#^[+-][[:space:]]*##' \
+                -e '/^[[:space:]]*$/d' \
+                -e '/^[[:space:]]*\/\//d' \
+                -e '/^[[:space:]]*\*/d' \
+                -e '/^[[:space:]]*/d' |
+              grep -vE '^$' || true
+            )"
+
+            if [[ -z "$code_lines" ]]; then
+              echo "Only comments/blank lines changed: $file"
+              continue
+            fi
+
+            has_code_changes=true
+
+            class="$(basename "$file" .java)"
+
+            echo "Changed production class: $class"
+
+            # Explicit testable naming conventions.
+            testable=false
+
+            case "$class" in
+              *Service|*Controller|*Utils|*Helpers|*Mapper|*Mappers)
+                testable=true
+                ;;
+            esac
+
+            # Any class that already has a corresponding test is testable.
+            matching_test="$(
+              find src/test/java \
+                -type f \
+                \( \
+                  -name "${class}Test.java" \
+                  -o -name "${class}Tests.java" \
+                \) \
+                | head -n 1 || true
+            )"
+
+            if [[ -n "$matching_test" ]]; then
+              testable=true
+            fi
+
+            if [[ "$testable" != "true" ]]; then
+              echo "No mandatory test convention for $class"
+              continue
+            fi
+
+            if [[ -z "$matching_test" ]]; then
+              echo "::error file=$file::Test required for $class but no ${class}Test.java or ${class}Tests.java was found."
+              exit 1
+            fi
+
+            echo "Found test: $matching_test"
+
+            # At least one actual JUnit test annotation must exist.
+            test_count="$(
+              grep -RE \
+                '@(Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)' \
+                "$matching_test" |
+              wc -l
+            )"
+
+            if [[ "$test_count" -lt 1 ]]; then
+              echo "::error file=$matching_test::Test class exists but contains no test method."
+              exit 1
+            fi
+
+            # Convert test source path into FQCN.
+            test_class="$(
+              echo "$matching_test" |
+              sed \
+                -e 's#^src/test/java/##' \
+                -e 's#/#.#g' \
+                -e 's#\.java$##'
+            )"
+
+            echo "$test_class" >> .ci/affected-tests.txt
+
+          done < changed-files.txt
+
+          sort -u .ci/affected-tests.txt -o .ci/affected-tests.txt
+
+          echo "Affected tests:"
+          cat .ci/affected-tests.txt
+
+          if [[ "$has_code_changes" == "false" ]]; then
+            echo "No production code changes detected."
+          fi
+
+      - name: Run affected tests
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s .ci/affected-tests.txt ]]; then
+            echo "No affected tests to execute."
+            exit 0
+          fi
+
+          tests="$(
+            paste -sd, .ci/affected-tests.txt
+          )"
+
+          echo "Running:"
+          echo "$tests"
+
+          ./mvnw -B \
+            -Dtest="$tests" \
+            -DfailIfNoTests=false \
+            test
+
+      - name: Generate JaCoCo report
+        run: |
+          ./mvnw -B \
+            -Dtest="$(paste -sd, .ci/affected-tests.txt 2>/dev/null || true)" \
+            -DfailIfNoTests=false \
+            test jacoco:report
+
+      - name: Publish JaCoCo summary
+        if: always()
+        run: |
+          if [[ -f target/site/jacoco/jacoco.xml ]]; then
+            echo "JaCoCo report generated."
+          else
+            echo "No JaCoCo report generated."
+          fi
