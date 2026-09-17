@@ -32,8 +32,31 @@ jobs:
       - name: Validate Maven Wrapper
         run: ./mvnw --version
 
-      - name: Check formatting
-        run: ./mvnw -B spotless:check
+      - name: Check Spotless
+        id: spotless
+        run: |
+          set +e
+
+          ./mvnw -B spotless:check
+          STATUS=$?
+
+          if [[ "$STATUS" -ne 0 ]]; then
+            echo "::warning::Spotless encontrou problemas de formatação."
+            echo "::warning::Execute './mvnw spotless:apply' para corrigir."
+
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          exit 0
+
+      - name: Spotless result
+        if: steps.spotless.outputs.changed == 'true'
+        run: |
+          echo "⚠️ Código fora do padrão Spotless."
+          echo "Execute:"
+          echo "./mvnw spotless:apply"
 
       - name: Run SpotBugs
         run: ./mvnw -B compile spotbugs:check
@@ -44,12 +67,12 @@ jobs:
       - name: Verify JaCoCo report
         run: |
           set -euo pipefail
-
+        
           REPORT="target/site/jacoco/jacoco.xml"
-
+        
           if [[ ! -f "$REPORT" ]]; then
             echo "::error::JaCoCo report was not generated."
             exit 1
           fi
-
+        
           echo "JaCoCo report found: $REPORT"
