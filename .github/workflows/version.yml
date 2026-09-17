@@ -1,4 +1,4 @@
-name: Version
+name: Release
 
 on:
   workflow_run:
@@ -9,10 +9,15 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+concurrency:
+  group: release-version
+  cancel-in-progress: false
 
 jobs:
-  version:
-    name: Calculate Version
+  release:
+    name: Version, Build and Publish
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main'
@@ -43,6 +48,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # ------------------------------------------------------------
+      # VERSION
+      # ------------------------------------------------------------
 
       - name: Calculate next version
         id: version
@@ -98,21 +107,25 @@ jobs:
 
             echo "Commit: $subject"
 
+            # MAJOR
             if [[ "$subject" =~ ^(feat|feature)!: ]]; then
               major=true
               continue
             fi
 
+            # MINOR
             if [[ "$subject" =~ ^(feat|feature): ]]; then
               minor=true
               continue
             fi
 
+            # PATCH
             if [[ "$subject" =~ ^(fix|refactor): ]]; then
               patch=true
               continue
             fi
 
+            # PATCH for relevant chore
             if [[ "$subject" =~ ^chore: ]]; then
 
               files="$(
@@ -175,6 +188,20 @@ jobs:
           echo "release=true" >> "$GITHUB_OUTPUT"
           echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
 
+      # ------------------------------------------------------------
+      # NO RELEASE
+      # ------------------------------------------------------------
+
+      - name: No release required
+        if: steps.version.outputs.release != 'true'
+        run: |
+          echo "No release required."
+          exit 0
+
+      # ------------------------------------------------------------
+      # MAVEN VERSION
+      # ------------------------------------------------------------
+
       - name: Update Maven version
         if: steps.version.outputs.release == 'true'
         env:
@@ -184,6 +211,33 @@ jobs:
             versions:set \
             -DnewVersion="$VERSION" \
             -DgenerateBackupPoms=false
+
+      - name: Verify Maven version
+        if: steps.version.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          POM_VERSION="$(
+            ./mvnw \
+              help:evaluate \
+              -Dexpression=project.version \
+              -q \
+              -DforceStdout
+          )"
+
+          echo "Expected version: $VERSION"
+          echo "Maven version:    $POM_VERSION"
+
+          if [[ "$VERSION" != "$POM_VERSION" ]]; then
+            echo "::error::Maven project version does not match release version."
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # COMMIT + TAG
+      # ------------------------------------------------------------
 
       - name: Commit release version
         if: steps.version.outputs.release == 'true'
@@ -209,10 +263,40 @@ jobs:
           git tag "v${VERSION}"
 
           git push origin "v${VERSION}"
-      - name: Trigger release
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          VERSION: ${{ env.VERSION }}
+
+      # ------------------------------------------------------------
+      # BUILD
+      # ------------------------------------------------------------
+
+      - name: Build application
+        if: steps.version.outputs.release == 'true'
         run: |
-          gh workflow run release.yml \
-            --ref "v${VERSION}"
+          ./mvnw -B clean verify
+
+      # ------------------------------------------------------------
+      # DOCKER
+      # ------------------------------------------------------------
+
+      - name: Login to GHCR
+        if: steps.version.outputs.release == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        if: steps.version.outputs.release == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and publish Docker image
+        if: steps.version.outputs.release == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
