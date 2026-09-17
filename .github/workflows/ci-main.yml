@@ -1,0 +1,55 @@
+name: CI - Main
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Full Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Enable Maven Wrapper
+        run: chmod +x mvnw
+
+      - name: Validate Maven Wrapper
+        run: ./mvnw --version
+
+      - name: Check formatting
+        run: ./mvnw -B spotless:check
+
+      - name: Run SpotBugs
+        run: ./mvnw -B compile spotbugs:check
+
+      - name: Full test suite
+        run: ./mvnw -B clean verify
+
+      - name: Verify JaCoCo report
+        run: |
+          set -euo pipefail
+
+          REPORT="target/site/jacoco/jacoco.xml"
+
+          if [[ ! -f "$REPORT" ]]; then
+            echo "::error::JaCoCo report was not generated."
+            exit 1
+          fi
+
+          echo "JaCoCo report found: $REPORT"
