@@ -1,0 +1,174 @@
+name: Version
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Calculate version
+        id: version
+        shell: bash
+        run: |
+
+          CURRENT_VERSION=$(./mvnw help:evaluate \
+            -Dexpression=project.version \
+            -q \
+            -DforceStdout)
+
+          echo "Current version: $CURRENT_VERSION"
+
+          BASE_VERSION="${CURRENT_VERSION%-SNAPSHOT}"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+
+          if [ -n "$LAST_TAG" ]; then
+            COMMITS=$(git log "$LAST_TAG..HEAD" \
+              --pretty=format:'%H%x09%s')
+          else
+            COMMITS=$(git log \
+              --pretty=format:'%H%x09%s')
+          fi
+
+          BUMP=0
+
+          while IFS=$'\t' read -r SHA SUBJECT; do
+
+            [ -z "$SHA" ] && continue
+
+            echo "Commit: $SUBJECT"
+
+            if [[ "$SUBJECT" =~ ^chore\(release\): ]]; then
+              continue
+            fi
+
+            # MAJOR
+            if [[ "$SUBJECT" =~ ^(feat|feature)!: ]]; then
+              BUMP=3
+              continue
+            fi
+
+            # MINOR
+            if [[ "$SUBJECT" =~ ^(feat|feature): ]]; then
+              [ "$BUMP" -lt 2 ] && BUMP=2
+              continue
+            fi
+
+            # PATCH
+            if [[ "$SUBJECT" =~ ^(fix|refactor): ]]; then
+              [ "$BUMP" -lt 1 ] && BUMP=1
+              continue
+            fi
+
+            # PATCH para chore que altera main/ ou Dockerfile
+            if [[ "$SUBJECT" =~ ^chore: ]]; then
+
+              FILES=$(git diff-tree \
+                --no-commit-id \
+                --name-only \
+                -r "$SHA")
+
+              if echo "$FILES" | grep -Eq '(^main/|^Dockerfile$)'; then
+                [ "$BUMP" -lt 1 ] && BUMP=1
+              fi
+
+            fi
+
+          done <<< "$COMMITS"
+
+          if [ "$BUMP" -eq 0 ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$BUMP" in
+            3)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            2)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            1)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+          echo "Release: $VERSION"
+
+            - name: Update pom.xml
+              if: steps.version.outputs.release == 'true'
+              env:
+                VERSION: ${{ steps.version.outputs.version }}
+              run: |
+
+                CURRENT_VERSION=$(sed -n \
+                  's/.*<version>\(.*\)<\/version>.*/\1/p' \
+                  pom.xml | head -n 1)
+
+                echo "Updating:"
+                echo "$CURRENT_VERSION → $VERSION"
+
+                sed -i \
+                  "0,/<version>[^<]*<\/version>/s//<version>${VERSION}<\/version>/" \
+                  pom.xml
+
+      - name: Commit release
+        if: steps.version.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          git add pom.xml
+
+          git commit \
+            -m "chore(release): ${VERSION} [skip ci]"
+
+      - name: Create tag
+        if: steps.version.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          git tag \
+            -a "v${VERSION}" \
+            -m "Release ${VERSION}"
+
+      - name: Push release
+        if: steps.version.outputs.release == 'true'
+        run: |
+
+          git push origin main
+          git push origin --tags

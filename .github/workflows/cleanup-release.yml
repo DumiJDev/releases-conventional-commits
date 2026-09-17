@@ -1,0 +1,110 @@
+name: Cleanup Release
+
+on:
+  workflow_run:
+    workflows:
+      - Release
+    types:
+      - completed
+
+permissions:
+  packages: write
+
+jobs:
+
+  cleanup:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Cleanup old images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+
+          PACKAGE="${GITHUB_REPOSITORY#*/}"
+
+          PACKAGE=$(echo "$PACKAGE" | tr '[:upper:]' '[:lower:]')
+
+          echo "Package: $PACKAGE"
+
+          # --------------------------------------------------
+          # Get package versions
+          # --------------------------------------------------
+
+          gh api \
+            --paginate \
+            "/user/packages/container/${PACKAGE}/versions?per_page=100" \
+            > versions.json
+
+          # --------------------------------------------------
+          # Get tagged versions, excluding latest
+          #
+          # Keep only semantic versions:
+          # X.Y.Z
+          # --------------------------------------------------
+
+          mapfile -t VERSIONS < <(
+            jq -r '
+              .[]
+              | .metadata.container.tags[]?
+              | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+            ' versions.json \
+            | sort -V -r \
+            | uniq
+          )
+
+          echo ""
+          echo "Versions:"
+          printf '%s\n' "${VERSIONS[@]}"
+
+          # --------------------------------------------------
+          # Keep 5
+          # --------------------------------------------------
+
+          KEEP=5
+
+          if [ "${#VERSIONS[@]}" -le "$KEEP" ]; then
+            echo ""
+            echo "Nothing to cleanup."
+            exit 0
+          fi
+
+          # --------------------------------------------------
+          # Delete versions older than the 5 newest
+          # --------------------------------------------------
+
+          for VERSION in "${VERSIONS[@]:$KEEP}"; do
+
+            echo ""
+            echo "Deleting: $VERSION"
+
+            VERSION_ID=$(
+              jq -r \
+                --arg version "$VERSION" '
+                  .[]
+                  | select(
+                      .metadata.container.tags
+                      | index($version)
+                    )
+                  | .id
+                ' versions.json \
+                | head -n 1
+            )
+
+            if [ -z "$VERSION_ID" ] || [ "$VERSION_ID" = "null" ]; then
+              echo "Could not find package ID for $VERSION"
+              continue
+            fi
+
+            gh api \
+              --method DELETE \
+              "/user/packages/container/${PACKAGE}/versions/${VERSION_ID}"
+
+          done
+
+          echo ""
+          echo "Cleanup complete."
