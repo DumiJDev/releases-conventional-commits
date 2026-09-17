@@ -96,6 +96,9 @@
 									</limits>
 								</rule>
 							</rules>
+							<excludes>
+								<exclude>io/github/dumijdev/release_conventional_commits/ReleaseConvetionalCommitsApplication.class</exclude>
+							</excludes>
 						</configuration>
 					</execution>
 
