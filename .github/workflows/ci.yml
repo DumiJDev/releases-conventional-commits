@@ -1,0 +1,233 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+
+  test:
+    name: Intelligent Tests
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Find changed files
+        id: changes
+        shell: bash
+        run: |
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+
+          echo "BASE=$BASE"
+          echo "HEAD=$HEAD"
+
+          git diff \
+            --name-only \
+            "$BASE" "$HEAD" \
+            > changed-files.txt
+
+          echo "Changed files:"
+          cat changed-files.txt
+
+      - name: Detect affected tests
+        id: tests
+        shell: bash
+        run: |
+
+          rm -f test-classes.txt
+
+          touch test-classes.txt
+
+          while IFS= read -r FILE; do
+
+            # ---------------------------------------------
+            # Apenas Java de produção
+            # ---------------------------------------------
+
+            [[ "$FILE" != src/main/java/*.java* ]] && continue
+
+            # ---------------------------------------------
+            # Arquivo ainda precisa existir
+            # ---------------------------------------------
+
+            [ -f "$FILE" ] || continue
+
+            # ---------------------------------------------
+            # Ignorar alteração apenas de comentários /
+            # whitespace
+            # ---------------------------------------------
+
+            BASE="${{ github.event.pull_request.base.sha }}"
+
+            if [ "${{ github.event_name }}" = "push" ]; then
+              BASE="${{ github.event.before }}"
+            fi
+
+            # Obtém apenas linhas adicionadas/removidas
+            DIFF=$(git diff \
+              "$BASE" HEAD \
+              -- "$FILE")
+
+            CODE_CHANGED=false
+
+            while IFS= read -r LINE; do
+
+              case "$LINE" in
+
+                "+++"*|"---"*)
+                  continue
+                  ;;
+
+                "+"*|"-"*)
+                  CONTENT="${LINE:1}"
+
+                  # Remove whitespace
+                  CLEAN=$(echo "$CONTENT" | sed 's/[[:space:]]//g')
+
+                  # Ignora vazio
+                  [ -z "$CLEAN" ] && continue
+
+                  # Ignora comentários simples
+                  [[ "$CLEAN" == //* ]] && continue
+
+                  # Ignora início/fim de comentário de bloco
+                  [[ "$CLEAN" == "/*" ]] && continue
+                  [[ "$CLEAN" == "*" ]] && continue
+                  [[ "$CLEAN" == "*/" ]] && continue
+
+                  CODE_CHANGED=true
+                  ;;
+
+              esac
+
+            done <<< "$DIFF"
+
+            if [ "$CODE_CHANGED" = false ]; then
+              echo "Ignoring comment/whitespace only: $FILE"
+              continue
+            fi
+
+            # ---------------------------------------------
+            # Nome da classe
+            # ---------------------------------------------
+
+            CLASS=$(basename "$FILE" .java)
+
+            # ---------------------------------------------
+            # Classes explicitamente testáveis
+            # ---------------------------------------------
+
+            TESTABLE=false
+
+            case "$CLASS" in
+              *Service|*Controller|*Utils|*Helpers|*Mapper)
+                TESTABLE=true
+                ;;
+            esac
+
+            # ---------------------------------------------
+            # Procura teste correspondente
+            # ---------------------------------------------
+
+            TEST_FILE=$(find src/test/java \
+              -type f \
+              -name "${CLASS}Test.java" \
+              | head -n 1)
+
+            # ---------------------------------------------
+            # Se não pertence às categorias mas existe
+            # teste correspondente, também é testável.
+            # ---------------------------------------------
+
+            if [ -n "$TEST_FILE" ]; then
+              TESTABLE=true
+            fi
+
+            if [ "$TESTABLE" = false ]; then
+              echo "Not testable: $FILE"
+              continue
+            fi
+
+            # ---------------------------------------------
+            # Teste não existe
+            # Não falhar.
+            # ---------------------------------------------
+
+            if [ -z "$TEST_FILE" ]; then
+              echo "No test found for: $CLASS"
+              continue
+            fi
+
+            echo "Affected:"
+            echo "  Source: $FILE"
+            echo "  Test:   $TEST_FILE"
+
+            echo "$CLASS" >> test-classes.txt
+
+          done < changed-files.txt
+
+          sort -u test-classes.txt -o test-classes.txt
+
+          echo ""
+          echo "Tests to run:"
+
+          cat test-classes.txt
+
+      - name: Run affected tests
+        shell: bash
+        run: |
+
+          if [ ! -s test-classes.txt ]; then
+            echo "No affected tests found."
+            exit 0
+          fi
+
+          TESTS=$(paste -sd, test-classes.txt)
+
+          echo "Running:"
+          echo "$TESTS"
+
+          chmod +x ./mvnw
+
+          ./mvnw \
+            -B \
+            -Dtest="$TESTS" \
+            test
+
+      - name: Build
+        shell: bash
+        run: |
+
+          chmod +x ./mvnw
+          
+          ./mvnw \
+            -B \
+            -DskipTests \
+            package
