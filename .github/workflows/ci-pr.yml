@@ -46,9 +46,12 @@ jobs:
           cat changed-files.txt
 
       - name: Validate formatting
+        id: spotless
+        continue-on-error: true
         run: ./mvnw -B spotless:check
 
       - name: Run SpotBugs
+        if: steps.spotless.outcome == 'failure'
         run: ./mvnw -B compile spotbugs:check
 
       - name: Detect affected tests
