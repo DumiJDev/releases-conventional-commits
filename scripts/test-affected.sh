@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-BASE_SHA="${BASE_SHA:-${GITHUB_EVENT_PULL_REQUEST_BASE_SHA:-}}"
-HEAD_SHA="${HEAD_SHA:-${GITHUB_SHA:-HEAD}}"
+BASE_SHA="${BASE_SHA:-}"
+HEAD_SHA="${HEAD_SHA:-HEAD}"
 
 if [[ -z "$BASE_SHA" ]]; then
   echo "::error::BASE_SHA não definido."
