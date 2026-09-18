@@ -57,6 +57,9 @@ jobs:
         run: chmod +x scripts/test-affected.sh
 
       - name: Verify affected tests
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: ./scripts/test-affected.sh
 
       - name: Verify affected tests
