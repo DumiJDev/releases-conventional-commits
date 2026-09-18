@@ -2,16 +2,23 @@
 
 set -euo pipefail
 
-BASE_SHA="${BASE_SHA:-}"
-HEAD_SHA="${HEAD_SHA:-HEAD}"
+echo "Event: ${GITHUB_EVENT_NAME:-unknown}"
+echo "Base ref: ${GITHUB_BASE_REF:-unknown}"
+echo "Head ref: ${GITHUB_HEAD_REF:-unknown}"
+echo "Base SHA: ${BASE_SHA:-missing}"
+echo "Head SHA: ${HEAD_SHA:-missing}"
 
-if [[ -z "$BASE_SHA" ]]; then
-  echo "::error::BASE_SHA não definido."
+if [[ -z "${BASE_SHA:-}" ]]; then
+  echo "::error::BASE_SHA não foi recebido pelo workflow."
   exit 1
 fi
 
-echo "Base: $BASE_SHA"
-echo "Head: $HEAD_SHA"
+HEAD_SHA="${HEAD_SHA:-HEAD}"
+
+echo "Comparando:"
+echo "  $BASE_SHA"
+echo "  $HEAD_SHA"
+
 
 changed_files="$(
   git diff --name-only "$BASE_SHA" "$HEAD_SHA"
