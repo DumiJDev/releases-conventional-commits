@@ -2,18 +2,42 @@
 
 set -euo pipefail
 
-echo "Event: ${GITHUB_EVENT_NAME:-unknown}"
-echo "Base ref: ${GITHUB_BASE_REF:-unknown}"
-echo "Head ref: ${GITHUB_HEAD_REF:-unknown}"
-echo "Base SHA: ${BASE_SHA:-missing}"
-echo "Head SHA: ${HEAD_SHA:-missing}"
-
-if [[ -z "${BASE_SHA:-}" ]]; then
-  echo "::error::BASE_SHA não foi recebido pelo workflow."
+if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]]; then
+  echo "::error::Este script deve ser executado em um evento pull_request."
   exit 1
 fi
 
-HEAD_SHA="${HEAD_SHA:-HEAD}"
+BASE_SHA="$(
+  python3 - <<'PY'
+import json
+import os
+
+with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
+    event = json.load(f)
+
+print(event["pull_request"]["base"]["sha"])
+PY
+)"
+
+HEAD_SHA="$(
+  python3 - <<'PY'
+import json
+import os
+
+with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
+    event = json.load(f)
+
+print(event["pull_request"]["head"]["sha"])
+PY
+)"
+
+echo "Event: ${GITHUB_EVENT_NAME}"
+echo "Base ref: ${GITHUB_BASE_REF}"
+echo "Head ref: ${GITHUB_HEAD_REF}"
+echo "Base SHA: ${BASE_SHA}"
+echo "Head SHA: ${HEAD_SHA}"
+
+git fetch origin main --depth=1 >/dev/null 2>&1 || true
 
 echo "Comparando:"
 echo "  $BASE_SHA"
